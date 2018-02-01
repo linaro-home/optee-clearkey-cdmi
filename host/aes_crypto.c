@@ -204,7 +204,7 @@ int TEE_crypto_init()
     errx(1, "TEEC_Opensession failed with code 0x%x origin 0x%x",
       res, err_origin);
 
-  if (!g_shm.buffer || !g_outm.buffer)
+  if (!g_iv.buffer || !g_key.buffer)
     allocate_mem();
 
  return res;
