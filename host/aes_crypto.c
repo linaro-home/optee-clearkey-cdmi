@@ -67,15 +67,8 @@
 static TEEC_Context ctx;
 static TEEC_Session sess;
 
-static TEEC_SharedMemory g_shm = {
-  .size =  24*1024*CTR_AES_BLOCK_SIZE , /* The Chuck Norris Constant Value */
-  .flags = TEEC_MEM_INPUT,
-};
-
-static TEEC_SharedMemory g_outm = {
-  .size =  24*1024*CTR_AES_BLOCK_SIZE , /* The Chuck Norris Constant Value */
-  .flags = TEEC_MEM_OUTPUT,
-};
+static TEEC_SharedMemory g_shm;
+static TEEC_SharedMemory g_outm;
 
 static TEEC_SharedMemory g_key = {
   .size = CTR_AES_BLOCK_SIZE, /* 16byte key */
@@ -93,19 +86,6 @@ static void allocate_mem(void)
 {
   TEEC_Result res;
 
-  res = TEEC_AllocateSharedMemory(&ctx, &g_shm);
-
-  CHECK(res, "TEEC_AllocateSharedMemory");
-
-  /* For clear key decryption we return the decrypted buffer
-   * unprotected to the browser. For DMA_BUF/TEE protected
-   * decryption we have to use a DMABuf reference to
-   * the decrypted buffer. See the secvideo_demo.c TEE example
-   */
-
-  res = TEEC_AllocateSharedMemory(&ctx, &g_outm);
-  CHECK(res, "TEEC_AllocateSharedMemory for output buffers");
-
   /* Allocate Initialization Vector shared with TEE */
   res = TEEC_AllocateSharedMemory(&ctx, &g_iv);
   CHECK(res, "TEEC_AllocateSharedMemory for IV");
@@ -118,10 +98,10 @@ static void allocate_mem(void)
 
 static void free_mem(void)
 {
-  PR("Release shared memory...\n");
-  TEEC_ReleaseSharedMemory(&g_shm);
-  PR("Release secure memory...\n");
-  TEEC_ReleaseSharedMemory(&g_outm);
+  PR("Release IV shared memory...\n");
+  TEEC_ReleaseSharedMemory(&g_iv);
+  PR("Release key shared memory...\n");
+  TEEC_ReleaseSharedMemory(&g_key);
 }
 
 static uint32_t commit_buffer_tee_aes_ctr128_decrypt(uint32_t sz,  const void* iv,
@@ -178,27 +158,28 @@ TEE_AES_ctr128_encrypt(const unsigned char* in_data,
     unsigned char iv[CTR_AES_BLOCK_SIZE],
     unsigned char ecount_buf[CTR_AES_BLOCK_SIZE],
     unsigned int *num) {
+    TEEC_Result res;
 
-  uint32_t offset = 0;
-  uint32_t decode_buffer_lenght = 0;
+  g_shm.size = length;
+  g_shm.buffer = in_data;
+  g_shm.flags = TEEC_MEM_INPUT;
 
-  if(length > g_outm.size) {
-    PR("Error. Input buffer is %d too large. We don't support decryption by chunks\n",  length);
-    return -1;
-   }
+  res = TEEC_RegisterSharedMemory(&ctx, &g_shm);
+  CHECK(res, "TEEC_RegisterSharedMemory: g_shm (in buf) failed");
 
-  decode_buffer_lenght = MIN(g_outm.size,  length - offset);
-  /* FIXME: we should avoid a memcpy here if possible.
-   * To achieve that the OP TEE allocated buffer needs to be exposed outside
-   * this library.
-   */
-  memcpy(g_shm.buffer, in_data + offset, decode_buffer_lenght);
+  g_outm.size = length;
+  g_outm.buffer = out_data;
+  g_outm.flags = TEEC_MEM_OUTPUT;
 
-  commit_buffer_tee_aes_ctr128_decrypt( decode_buffer_lenght,
+  res = TEEC_RegisterSharedMemory(&ctx, &g_outm);
+  CHECK(res, "TEEC_RegisterSharedMemory: g_outm (out buf) failed");
+
+  commit_buffer_tee_aes_ctr128_decrypt( length,
       iv, CTR_AES_IV_SIZE,  key, CTR_AES_KEY_SIZE, 0);
 
-  memcpy(out_data + offset , g_outm.buffer, decode_buffer_lenght);
-  offset += decode_buffer_lenght;
+  TEEC_ReleaseSharedMemory(&g_shm);
+  TEEC_ReleaseSharedMemory(&g_outm);
+
   return 0;
 }
 
@@ -208,7 +189,7 @@ int TEE_crypto_init()
   TEEC_UUID uuid = TA_AES_DECRYPTOR_UUID;
   uint32_t err_origin;
 
-  if(g_shm.buffer)
+  if(g_iv.buffer)
     return TEEC_SUCCESS;
 
   res = TEEC_InitializeContext(NULL, &ctx);
@@ -232,7 +213,7 @@ int TEE_crypto_init()
 int
 TEE_crypto_close() {
 
-  if(!g_shm.buffer)
+  if(!g_iv.buffer)
     return TEEC_SUCCESS;
 
   free_mem();
