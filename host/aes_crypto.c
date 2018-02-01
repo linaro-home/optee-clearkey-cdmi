@@ -161,14 +161,14 @@ TEE_AES_ctr128_encrypt(const unsigned char* in_data,
     TEEC_Result res;
 
   g_shm.size = length;
-  g_shm.buffer = in_data;
+  g_shm.buffer = (void *) in_data;
   g_shm.flags = TEEC_MEM_INPUT;
 
   res = TEEC_RegisterSharedMemory(&ctx, &g_shm);
   CHECK(res, "TEEC_RegisterSharedMemory: g_shm (in buf) failed");
 
   g_outm.size = length;
-  g_outm.buffer = out_data;
+  g_outm.buffer = (void *) out_data;
   g_outm.flags = TEEC_MEM_OUTPUT;
 
   res = TEEC_RegisterSharedMemory(&ctx, &g_outm);
