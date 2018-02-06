@@ -44,7 +44,7 @@
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 
-#define PR(args...) do { printf(args); fflush(stdout); } while (0)
+#define MIN(a,b) (((a)<(b))?(a):(b))
 
 #define CHECK_INVOKE2(res, orig, fn)              \
   do {                    \
@@ -79,8 +79,6 @@ static TEEC_SharedMemory g_iv = {
   .size = CTR_AES_BLOCK_SIZE,
   .flags = TEEC_MEM_INPUT,
 };
-
-#define FP(args...) do { fprintf(stderr, args); } while(0)
 
 static void allocate_mem(void)
 {
