@@ -1,6 +1,7 @@
 /**
  * Copyright (C) STM 2016. Linaro LTD
  * Author: Zoltan Kuscsik <zoltan.kuscsik@linaro.org>
+ *         Peter Griffin <peter.griffin@linaro.org>
  */
 
 #include <tee_internal_api.h>
@@ -115,7 +116,7 @@ static TEE_Result decrypt_128_ctr_aes(void *in, uint32_t sz, /*input buffer and 
   res = TEE_CipherDoFinal(crypto_op, in, sz, out, outsz);
   CHECK(res, "TEE_CipherDoFinal", return res;);
   if(*outsz != sz) {
-    DMSG("FXIME: output buffer size does not match the input buffer size");
+    EMSG("FXIME: output buffer size does not match the input buffer size");
     return TEE_ERROR_GENERIC;
   }
   return TEE_SUCCESS;
@@ -129,8 +130,10 @@ static TEE_Result aes_Ctr128_Encrypt(uint32_t param_types, TEE_Param params[4])
 
   uint32_t exp_param_types = AES_CTR128_ENCRYPT_TEE_PARAM_TYPES;
 
-  if (param_types != exp_param_types)
+  if (param_types != exp_param_types) {
+    EMSG("%s: bad parameters\n",__func__);
     return TEE_ERROR_BAD_PARAMETERS;
+  }
 
   /* Input buffer */
   buf = params[PARAM_AES_ENCRYPTED_BUFFER_IDX].memref.buffer;
@@ -153,25 +156,93 @@ static TEE_Result aes_Ctr128_Encrypt(uint32_t param_types, TEE_Param params[4])
   key = params[PARAM_AES_KEY].memref.buffer;
   key_size = params[PARAM_AES_KEY].memref.size;
 
-  if (key_size == 0)
+  if (key_size == 0) {
+    EMSG("%s: key size to short\n",__func__);
     return TEE_ERROR_SHORT_BUFFER;
+  }
+  /* Validate that the destination buffer is actually in secure memory.
+   * This is mandatory to protect against a malicious REE application
+   * sending a shared (non-secure) memory buffer but identifying it as
+   * a 'Secure' buffer type. */
+  res = TEE_CheckMemoryAccessRights(TEE_MEMORY_ACCESS_ANY_OWNER |
+				    TEE_MEMORY_ACCESS_WRITE | TEE_MEMORY_ACCESS_SECURE,
+				    outbuf, outsz);
 
-  /*
-   * By not setting TEE_MEMORY_ACCESS_ANY_OWNER flag, we check
-   * that the output buffer cannot be observed by a less trusted
-   * component.
-   */
-  res = TEE_CheckMemoryAccessRights(TEE_MEMORY_ACCESS_WRITE,
-            outbuf, outsz);
+  if (res != TEE_SUCCESS) {
+    EMSG("%s: WARNING: output buffer is not in secure memory", __func__);
+    /* return TEE_ERROR_SECURITY;*/
+  }
 
-  if (res != TEE_SUCCESS)
-    DMSG("%s: WARNING: output buffer is not secure", __func__);
-
+  res = TEE_CacheFlush((char *)outbuf, outsz);
+  CHECK(res, "TEE_CacheFlush", return res;);
 
   res = decrypt_128_ctr_aes(buf, sz, outbuf, &outsz,
             (uint8_t*) key, key_size,
             (uint8_t*) iv,  iv_size
            );
+
+  if (res != TEE_SUCCESS) {
+      EMSG("%s: decrypt_128_ctr_aes failed\n", __func__);
+      return res;
+  }
+
+  res = TEE_CacheFlush((char *)outbuf, outsz);
+  CHECK(res, "TEE_CacheFlush", return res;);
+
+  return TEE_SUCCESS;
+}
+
+static TEE_Result copy_secure_memory(uint32_t param_types, TEE_Param params[4])
+{
+  TEE_Result res;
+  void *inbuf, *outbuf;
+  uint32_t insz, outsz;
+
+  uint32_t exp_param_types = COPY_SECURE_MEMORY_TEE_PARAM_TYPES;
+
+  if (param_types != exp_param_types) {
+    EMSG("%s: incorrect parameters", __func__);
+    return TEE_ERROR_BAD_PARAMETERS;
+  }
+
+  /* Input buffer */
+  inbuf = params[PARAM_COPY_SECURE_MEMORY_SOURCE].memref.buffer;
+  insz = params[PARAM_AES_ENCRYPTED_BUFFER_IDX].memref.size;
+
+  outbuf = params[PARAM_COPY_SECURE_MEMORY_DESTINATION].memref.buffer;
+  outsz = params[PARAM_COPY_SECURE_MEMORY_DESTINATION].memref.size;
+
+  if (!inbuf || insz == 0 || outsz == 0 || !outbuf) {
+    EMSG("%s: incorrect parameters", __func__);
+    return TEE_ERROR_BAD_FORMAT;
+  }
+
+  if (insz > outsz) {
+    EMSG("%s: output buffer to small", __func__);
+    return TEE_ERROR_BAD_FORMAT;
+  }
+
+  /* Validate that the destination buffer is actually in secure memory.
+   * This is mandatory to protect against a malicious REE application
+   * sending a shared (non-secure) memory buffer but identifying it as
+   * a 'Secure' buffer type. */
+  res = TEE_CheckMemoryAccessRights(TEE_MEMORY_ACCESS_ANY_OWNER |
+				    TEE_MEMORY_ACCESS_WRITE | TEE_MEMORY_ACCESS_SECURE,
+				    outbuf, outsz);
+
+  if (res != TEE_SUCCESS) {
+    EMSG("%s: WARNING: output buffer is not in secure memory", __func__);
+    /*return TEE_ERROR_SECURITY;*/
+  }
+
+  res = TEE_CacheFlush((char *)outbuf, outsz);
+  CHECK(res, "TEE_CacheFlush", return res;);
+
+  /* inject data */
+  TEE_MemMove(outbuf, inbuf, insz);
+
+  res = TEE_CacheFlush((char *)outbuf, outsz);
+  CHECK(res, "TEE_CacheFlush", return res;);
 
   if (res != TEE_SUCCESS)
       return res;
@@ -192,6 +263,8 @@ TEE_Result TA_InvokeCommandEntryPoint(void *sess_ctx, uint32_t cmd_id,
   switch (cmd_id) {
   case TA_AES_CTR128_ENCRYPT:
     return aes_Ctr128_Encrypt(param_types, params);
+  case TA_COPY_SECURE_MEMORY:
+    return copy_secure_memory(param_types, params);
   default:
     return TEE_ERROR_BAD_PARAMETERS;
   }
