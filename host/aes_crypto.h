@@ -43,7 +43,15 @@ TEE_AES_ctr128_encrypt(const unsigned char* in_data,
     uint32_t length, const char* key,
     unsigned char iv[CTR_AES_BLOCK_SIZE],
     unsigned char ecount_buf[CTR_AES_BLOCK_SIZE],
-    unsigned int *num);
+    unsigned int *num,
+    uint32_t offset,
+    bool secure);
+
+/* Copy from source buffer to secure dest buffer */
+int TEE_copy_secure_memory(const unsigned char* out_data,
+    const unsigned char* in_data,
+    uint32_t length,
+    uint32_t offset);
 
 /* Close TEE session and close memory*/
 int
