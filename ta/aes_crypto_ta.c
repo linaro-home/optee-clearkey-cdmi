@@ -156,8 +156,9 @@ static TEE_Result aes_Ctr128_Encrypt(uint32_t param_types, TEE_Param params[4])
   key = params[PARAM_AES_KEY].memref.buffer;
   key_size = params[PARAM_AES_KEY].memref.size;
 
-  if (key_size == 0) {
-    EMSG("%s: key size to short\n",__func__);
+  if (key_size == 0 || sz == 0 || outsz == 0 || sz > outsz
+      || buf == NULL || outbuf == NULL) {
+    EMSG("%s: buffer to short\n", __func__);
     return TEE_ERROR_SHORT_BUFFER;
   }
   /* Validate that the destination buffer is actually in secure memory.
@@ -243,9 +244,6 @@ static TEE_Result copy_secure_memory(uint32_t param_types, TEE_Param params[4])
 
   res = TEE_CacheFlush((char *)outbuf, outsz);
   CHECK(res, "TEE_CacheFlush", return res;);
-
-  if (res != TEE_SUCCESS)
-      return res;
 
   return TEE_SUCCESS;
 }
