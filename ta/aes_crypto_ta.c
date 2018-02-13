@@ -16,7 +16,7 @@
 
 #define CHECK(res, name, action) do { \
     if ((res) != TEE_SUCCESS) { \
-      DMSG(name ": 0x%08x", (res)); \
+      EMSG(name ": 0x%08x", (res)); \
       action \
     } \
   } while(0)
