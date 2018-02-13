@@ -29,6 +29,8 @@
 
 #ifdef __ANDROID__
 #include <log/log.h>
+//#define LOG_NDEBUG 0
+#define LOG_TAG "ClearKeyCryptoPlugin libteec_aes"
 #define PR(args...) do { ALOGI(args); } while (0)
 #define FP(args...) do { ALOGE(args); } while (0)
 #else
