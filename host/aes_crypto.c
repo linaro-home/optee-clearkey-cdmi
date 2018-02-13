@@ -201,8 +201,9 @@ TEE_AES_ctr128_encrypt(const unsigned char* in_data,
     secure_fd = allocate_ion_buffer(length, ION_HEAP_TYPE_UNMAPPED);
 #endif
 
-    g_outm.flags = TEEC_MEM_OUTPUT;
     g_outm.size = length;
+    g_outm.flags = TEEC_MEM_OUTPUT;
+
     res = TEEC_RegisterSharedMemoryFileDescriptor(&ctx, &g_outm, secure_fd);
     CHECK(res, "TEEC_RegisterSharedMemory: g_outm (out buf) failed");
   }
@@ -245,9 +246,7 @@ int TEE_copy_secure_memory(const unsigned char* out_data, const unsigned char* i
 
   g_outm.flags = TEEC_MEM_OUTPUT;
   res = TEEC_RegisterSharedMemoryFileDescriptor(&ctx, &g_outm, secure_fd);
-
-  CHECK(res, "TEEC_RegisterSharedMemory: g_outm (out buf) failed");
-  /* TODO revisit error handling */
+  CHECK(res, "TEEC_RegisterSharedMemoryFileDescriptor: g_outm (out buf) failed");
 
   op.paramTypes = TEEC_PARAM_TYPES(TEEC_MEMREF_PARTIAL_INPUT,
 				   TEEC_MEMREF_PARTIAL_OUTPUT, TEEC_NONE,
