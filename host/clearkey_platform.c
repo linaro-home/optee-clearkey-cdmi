@@ -33,6 +33,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include "logging.h"
+#include "ion/ion.h"
 /*
  * Secure memory implementation is platform specified. For example,
  * a library called 'secure sedget library' is applied on platform
