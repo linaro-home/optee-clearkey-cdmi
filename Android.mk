@@ -15,8 +15,7 @@ CFG_TEEC_PUBLIC_INCLUDE = $(LOCAL_PATH)/../optee_client/public
 # Build hello world                                                            #
 ################################################################################
 include $(CLEAR_VARS)
-LOCAL_CFLAGS += -DANDROID_BUILD
-#-DSDP_PROTOTYPE
+LOCAL_CFLAGS += -DANDROID_BUILD -DSDP_PROTOTYPE
 LOCAL_CFLAGS += -Wall
 
 LOCAL_SRC_FILES += host/aes_crypto.c host/clearkey_platform.c
