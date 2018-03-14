@@ -35,13 +35,7 @@ enum {
   /*
    * AES CTR127 ENCRYPTION using a Counter IV */
   TA_AES_CTR128_ENCRYPT = 0,
-  /*
-   * Update a framebuffer area
-   * - params[0].memref points to shared memory containing image data
-   * - params[1].value.a is the offset into the target framebuffer
-   * - params[1].value.b contains flags (IMAGE_START, etc.)
-   */
-  TA_SECVIDEO_DEMO_IMAGE_DATA,
+  TA_COPY_SECURE_MEMORY,
 };
 
 /*
@@ -56,10 +50,27 @@ enum {
  PARAM_AES_KEY,
 };//Max size of this enum is 4, limited by TEEC_PAYLOAD_REF_COUNT
 
+/*
+ * Index of various data structures in COPY_SECURE_MEMORY command.
+ * Any modification in this enum needs to be synced
+ * with COPY_SECURE_MEMORY_PARAM_TYPES
+ */
+enum {
+ PARAM_COPY_SECURE_MEMORY_SOURCE = 0,
+ PARAM_COPY_SECURE_MEMORY_DESTINATION
+};//Max size of this enum is 4, limited by TEEC_PAYLOAD_REF_COUNT
+
+
 #define AES_CTR128_ENCRYPT_TEE_PARAM_TYPES TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,\
                TEE_PARAM_TYPE_MEMREF_OUTPUT,\
                TEE_PARAM_TYPE_MEMREF_INPUT,\
                TEE_PARAM_TYPE_MEMREF_INPUT);
+
+#define COPY_SECURE_MEMORY_TEE_PARAM_TYPES TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,\
+               TEE_PARAM_TYPE_MEMREF_OUTPUT,\
+               TEE_PARAM_TYPE_NONE,\
+               TEE_PARAM_TYPE_NONE);
+
 
 #define IMAGE_END 2
 #define AES_KEY_IS_CLEARKEY 4

@@ -26,6 +26,7 @@
  */
 
 #include <endian.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <err.h>
@@ -37,15 +38,18 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <tee_client_api.h>
+#include <tee_client_api_extensions.h>
 #include <aes_crypto_ta.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "aes_crypto.h"
+#include "clearkey_platform.h"
+#include "logging.h"
+#include "include/uapi/linux/ion.h"
+
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
-
-#define PR(args...) do { printf(args); fflush(stdout); } while (0)
 
 #define CHECK_INVOKE2(res, orig, fn)              \
   do {                    \
@@ -68,15 +72,8 @@
 static TEEC_Context ctx;
 static TEEC_Session sess;
 
-static TEEC_SharedMemory g_shm = {
-  .size =  24*1024*CTR_AES_BLOCK_SIZE , /* The Chuck Norris Constant Value */
-  .flags = TEEC_MEM_INPUT,
-};
-
-static TEEC_SharedMemory g_outm = {
-  .size =  24*1024*CTR_AES_BLOCK_SIZE , /* The Chuck Norris Constant Value */
-  .flags = TEEC_MEM_OUTPUT,
-};
+static TEEC_SharedMemory g_shm;
+static TEEC_SharedMemory g_outm;
 
 static TEEC_SharedMemory g_key = {
   .size = CTR_AES_BLOCK_SIZE, /* 16byte key */
@@ -88,24 +85,9 @@ static TEEC_SharedMemory g_iv = {
   .flags = TEEC_MEM_INPUT,
 };
 
-#define FP(args...) do { fprintf(stderr, args); } while(0)
-
 static void allocate_mem(void)
 {
   TEEC_Result res;
-
-  res = TEEC_AllocateSharedMemory(&ctx, &g_shm);
-
-  CHECK(res, "TEEC_AllocateSharedMemory");
-
-  /* For clear key decryption we return the decrypted buffer
-   * unprotected to the browser. For DMA_BUF/TEE protected
-   * decryption we have to use a DMABuf reference to
-   * the decrypted buffer. See the secvideo_demo.c TEE example
-   */
-
-  res = TEEC_AllocateSharedMemory(&ctx, &g_outm);
-  CHECK(res, "TEEC_AllocateSharedMemory for output buffers");
 
   /* Allocate Initialization Vector shared with TEE */
   res = TEEC_AllocateSharedMemory(&ctx, &g_iv);
@@ -117,14 +99,6 @@ static void allocate_mem(void)
 
 }
 
-static void free_mem(void)
-{
-  PR("Release shared memory...\n");
-  TEEC_ReleaseSharedMemory(&g_shm);
-  PR("Release secure memory...\n");
-  TEEC_ReleaseSharedMemory(&g_outm);
-}
-
 /* increment counter (128-bit int) */
 static void ctr128_inc(uint8_t *counter, uint32_t increment)
 {
@@ -134,52 +108,15 @@ static void ctr128_inc(uint8_t *counter, uint32_t increment)
 
 }
 
-static uint32_t commit_buffer_tee_aes_ctr128_decrypt(uint32_t sz,  const void* iv,
-    uint32_t iv_size,
-    const char* key, uint32_t key_size, int flags)
+static void free_mem(void)
 {
-  TEEC_Result res;
-  TEEC_Operation op;
-  uint32_t err_origin;
-
-  assert(key_size == g_key.size);
-  assert(iv_size == CTR_AES_IV_SIZE);
-
-  /* Store keys in shared memory */
-  memcpy(g_key.buffer, key, key_size);
-  memcpy(g_iv.buffer, iv, iv_size);
-
-  op.paramTypes = TEEC_PARAM_TYPES(TEEC_MEMREF_PARTIAL_INPUT,
-           TEEC_MEMREF_WHOLE, TEEC_MEMREF_WHOLE,
-           TEEC_MEMREF_WHOLE);
-
-  /* TA input buffer */
-  op.params[PARAM_AES_ENCRYPTED_BUFFER_IDX].memref.parent = &g_shm;
-  op.params[PARAM_AES_ENCRYPTED_BUFFER_IDX].memref.offset = 0;
-  op.params[PARAM_AES_ENCRYPTED_BUFFER_IDX].memref.size = sz;
-  /* TA output buffer */
-  op.params[PARAM_AES_DECRYPTED_BUFFER_IDX].memref.parent = &g_outm;
-  /* TA IV */
-  op.params[PARAM_AES_IV_IDX].memref.parent = &g_iv;
-  op.params[PARAM_AES_IV_IDX].memref.size = iv_size;
-  /* TA Key */
-  op.params[PARAM_AES_KEY].memref.parent = &g_key;
-  op.params[PARAM_AES_KEY].memref.size =  key_size;
-
-  res = TEEC_InvokeCommand(&sess, TA_AES_CTR128_ENCRYPT, &op,
-         &err_origin);
-  CHECK_INVOKE(res, err_origin);
-
-  return sz;
+  PR("Release IV shared memory...\n");
+  TEEC_ReleaseSharedMemory(&g_iv);
+  PR("Release key shared memory...\n");
+  TEEC_ReleaseSharedMemory(&g_key);
 }
 
-/* Decrypt buffer
- *
- * Warning: This function is not thread safe!
- * We using only one instance of the shared memory.
- * The OP TEE shared memory is a limited resource and
- * we want to avoid re-allocations.
- * */
+/* Decrypt buffer */
 
 int
 TEE_AES_ctr128_encrypt(const unsigned char* in_data,
@@ -187,53 +124,96 @@ TEE_AES_ctr128_encrypt(const unsigned char* in_data,
     uint32_t length, const char* key,
     unsigned char iv[CTR_AES_BLOCK_SIZE],
     unsigned char ecount_buf[CTR_AES_BLOCK_SIZE],
-    unsigned int *num) {
-
-  uint32_t offset = 0;
-  uint32_t decode_buffer_lenght = 0;
+    unsigned int *num,
+    uint32_t offset,
+    bool secure) {
+  TEEC_Result res;
+  int secure_fd = -1;
+  TEEC_Operation op;
+  uint32_t err_origin;
   uint32_t n = 0;
-   uint32_t blockOffset = *num;
-   uint32_t len = length;
-#if 0
-  while (blockOffset && len) {
-    --len;
-    blockOffset = (blockOffset + 1) % 16;
-  }
+  uint32_t blockOffset = *num;
+  uint32_t len = length;
+
+  if (!key || !out_data || !num || !iv)
+    return 0;
+
+  if (blockOffset > 0)
+    memcpy(in_data + offset - blockOffset, ecount_buf, blockOffset);
+
+  if (secure) {
+    /* extract fd */
+    secure_fd = clearkey_plat_get_mem_fd((void *)out_data);
+
+#ifdef SDP_PROTOTYPE
+    secure_fd = allocate_ion_buffer(length + blockOffset, ION_HEAP_TYPE_UNMAPPED);
 #endif
-  if(blockOffset > 0)
-  {
-    memcpy(g_shm.buffer, ecount_buf, blockOffset);
-    //offset = CTR_AES_BLOCK_SIZE - blockOffset;
+
+    //g_outm.size = length;
+    g_outm.flags = TEEC_MEM_OUTPUT;
+
+    res = TEEC_RegisterSharedMemoryFileDescriptor(&ctx, &g_outm, secure_fd);
+    CHECK(res, "TEEC_RegisterSharedMemory: g_outm (out buf) failed");
   }
 
-  if(length > g_outm.size) {
-    PR("Error. Input buffer is %d too large. We don't support decryption by chunks\n",  length);
-    return -1;
-   }
+  /* Store keys in shared memory */
+  memcpy(g_key.buffer, key, CTR_AES_KEY_SIZE);
+  memcpy(g_iv.buffer, iv, CTR_AES_IV_SIZE);
 
-  decode_buffer_lenght = MIN(g_outm.size,  length - offset);
-  /* FIXME: we should avoid a memcpy here if possible.
-   * To achieve that the OP TEE allocated buffer needs to be exposed outside
-   * this library.
-   */
-  if(blockOffset > 0) {
-    memcpy(g_shm.buffer + blockOffset , in_data , decode_buffer_lenght);
-
-    commit_buffer_tee_aes_ctr128_decrypt( decode_buffer_lenght + blockOffset,
-      iv, CTR_AES_IV_SIZE,  key, CTR_AES_KEY_SIZE, 0);
-    memcpy(out_data , g_outm.buffer + blockOffset, decode_buffer_lenght);
-    if(decode_buffer_lenght + blockOffset > 16)
-      len = decode_buffer_lenght + blockOffset;
-  } else{
-    memcpy(g_shm.buffer , in_data + offset, decode_buffer_lenght);
-    commit_buffer_tee_aes_ctr128_decrypt( decode_buffer_lenght,
-      iv, CTR_AES_IV_SIZE,  key, CTR_AES_KEY_SIZE, 0);
-    memcpy(out_data , g_outm.buffer, decode_buffer_lenght);
+  if (!secure) {
+    op.paramTypes = TEEC_PARAM_TYPES(TEEC_MEMREF_TEMP_INPUT,
+				     TEEC_MEMREF_TEMP_OUTPUT, TEEC_MEMREF_WHOLE,
+				     TEEC_MEMREF_WHOLE);
+  } else {
+    op.paramTypes = TEEC_PARAM_TYPES(TEEC_MEMREF_TEMP_INPUT,
+				     TEEC_MEMREF_PARTIAL_OUTPUT, TEEC_MEMREF_WHOLE,
+				     TEEC_MEMREF_WHOLE);
   }
-  
 
-  //blockOffset = length % CTR_AES_BLOCK_SIZE;
-  //*num += blockOffset;
+  /* TA input buffer */
+  op.params[PARAM_AES_ENCRYPTED_BUFFER_IDX].tmpref.buffer =
+    (void *) (in_data + offset - blockOffset);
+
+  op.params[PARAM_AES_ENCRYPTED_BUFFER_IDX].tmpref.size =
+    length + blockOffset;
+
+  /* TA output buffer */
+  if (!secure) {
+    op.params[PARAM_AES_DECRYPTED_BUFFER_IDX].tmpref.buffer =
+      (void *) (out_data + offset - blockOffset);
+
+    op.params[PARAM_AES_DECRYPTED_BUFFER_IDX].tmpref.size =
+      length + blockOffset;
+  } else {
+    op.params[PARAM_AES_DECRYPTED_BUFFER_IDX].memref.parent = &g_outm;
+    op.params[PARAM_AES_DECRYPTED_BUFFER_IDX].memref.size =
+      length + blockOffset;
+
+    op.params[PARAM_AES_DECRYPTED_BUFFER_IDX].memref.offset =
+      offset - blockOffset;
+#ifdef SDP_PROTOTYPE
+    op.params[PARAM_AES_DECRYPTED_BUFFER_IDX].memref.offset = 0;
+#endif
+  }
+
+  /* TA IV */
+  op.params[PARAM_AES_IV_IDX].memref.parent = &g_iv;
+  op.params[PARAM_AES_IV_IDX].memref.size = CTR_AES_BLOCK_SIZE;
+  /* TA Key */
+  op.params[PARAM_AES_KEY].memref.parent = &g_key;
+  op.params[PARAM_AES_KEY].memref.size =  CTR_AES_KEY_SIZE;
+
+  res = TEEC_InvokeCommand(&sess, TA_AES_CTR128_ENCRYPT, &op,
+         &err_origin);
+  CHECK_INVOKE(res, err_origin);
+
+#ifdef SDP_PROTOTYPE
+  ion_map_and_memcpy(out_data + offset, length, secure_fd, blockOffset);
+  close(secure_fd);
+#endif
+
+  if(length + blockOffset > 16)
+    len = length + blockOffset;
 
   while (len >= 16) {
     ctr128_inc(iv, 1);
@@ -243,26 +223,77 @@ TEE_AES_ctr128_encrypt(const unsigned char* in_data,
   }
 
   if (len) {
-       while (len--) {
-        ++blockOffset;
-      }
-
-    memcpy(ecount_buf, in_data + n*CTR_AES_BLOCK_SIZE, blockOffset);
+    while (len--) {
+      ++blockOffset;
+    }
+    memcpy(ecount_buf, in_data + offset + n*CTR_AES_BLOCK_SIZE, blockOffset);
   }
   *num = blockOffset;
-#if 0
-  n = length / CTR_AES_BLOCK_SIZE;
 
-  if(n == 0 && *num == 0)
-    ctr128_inc(iv, 1);
-  else {
-    ctr128_inc(iv, n);
-  }
+  if (secure)
+    TEEC_ReleaseSharedMemory(&g_outm);
+
+  return 0;
+}
+
+int TEE_copy_secure_memory(const unsigned char* out_data, const unsigned char* in_data,
+			   uint32_t length, uint32_t offset)
+{
+  int secure_fd = -1;
+  TEEC_Operation op;
+  TEEC_Result res;
+  uint32_t err_origin;
+
+  memset(&g_shm, 0, sizeof(TEEC_SharedMemory));
+  memset(&g_outm, 0, sizeof(TEEC_SharedMemory));
+
+  g_shm.size = length;
+  g_shm.buffer = (void *) (in_data + offset);
+  g_shm.flags = TEEC_MEM_INPUT;
+
+  res = TEEC_RegisterSharedMemory(&ctx, &g_shm);
+  CHECK(res, "TEEC_RegisterSharedMemory: g_shm (in buf) failed");
+
+  secure_fd = clearkey_plat_get_mem_fd((void *)out_data);
+#ifdef SDP_PROTOTYPE
+  secure_fd = allocate_ion_buffer(length, ION_HEAP_TYPE_UNMAPPED);
 #endif
 
-  //memcpy(out_data + offset , g_outm.buffer, decode_buffer_lenght);
-  //offset += decode_buffer_lenght;
-  ;
+  g_outm.flags = TEEC_MEM_OUTPUT;
+  res = TEEC_RegisterSharedMemoryFileDescriptor(&ctx, &g_outm, secure_fd);
+  CHECK(res, "TEEC_RegisterSharedMemoryFileDescriptor: g_outm (out buf) failed");
+
+  op.paramTypes = TEEC_PARAM_TYPES(TEEC_MEMREF_PARTIAL_INPUT,
+				   TEEC_MEMREF_PARTIAL_OUTPUT, TEEC_NONE,
+				   TEEC_NONE);
+
+  /* TA input buffer */
+  op.params[PARAM_COPY_SECURE_MEMORY_SOURCE].memref.parent = &g_shm;
+  op.params[PARAM_COPY_SECURE_MEMORY_SOURCE].memref.offset = 0;
+  op.params[PARAM_COPY_SECURE_MEMORY_SOURCE].memref.size = length;
+  /* TA output buffer */
+  op.params[PARAM_COPY_SECURE_MEMORY_DESTINATION].memref.parent = &g_outm;
+  op.params[PARAM_COPY_SECURE_MEMORY_DESTINATION].memref.offset = offset;
+  op.params[PARAM_COPY_SECURE_MEMORY_DESTINATION].memref.size = length;
+
+#ifdef SDP_PROTOTYPE
+  /* no offset for sdp_protoype buffer */
+  op.params[PARAM_COPY_SECURE_MEMORY_DESTINATION].memref.offset = 0;
+#endif
+
+  res = TEEC_InvokeCommand(&sess, TA_COPY_SECURE_MEMORY, &op,
+         &err_origin);
+  CHECK_INVOKE(res, err_origin);
+
+#ifdef SDP_PROTOTYPE
+  /* sdp_protoype test code assumes memory isn't actually secure */
+  ion_map_and_memcpy(out_data + offset, length, secure_fd, 0);
+  close(secure_fd);
+#endif
+
+  TEEC_ReleaseSharedMemory(&g_shm);
+  TEEC_ReleaseSharedMemory(&g_outm);
+
   return 0;
 }
 
@@ -272,7 +303,7 @@ int TEE_crypto_init()
   TEEC_UUID uuid = TA_AES_DECRYPTOR_UUID;
   uint32_t err_origin;
 
-  if(g_shm.buffer)
+  if(g_iv.buffer)
     return TEEC_SUCCESS;
 
   res = TEEC_InitializeContext(NULL, &ctx);
@@ -287,7 +318,7 @@ int TEE_crypto_init()
     errx(1, "TEEC_Opensession failed with code 0x%x origin 0x%x",
       res, err_origin);
 
-  if (!g_shm.buffer || !g_outm.buffer)
+  if (!g_iv.buffer || !g_key.buffer)
     allocate_mem();
 
  return res;
@@ -296,13 +327,12 @@ int TEE_crypto_init()
 int
 TEE_crypto_close() {
 
-  if(!g_shm.buffer)
+  if(!g_iv.buffer)
     return TEEC_SUCCESS;
 
   free_mem();
 
   TEEC_CloseSession(&sess);
   TEEC_FinalizeContext(&ctx);
-
   return TEEC_SUCCESS;
 }
