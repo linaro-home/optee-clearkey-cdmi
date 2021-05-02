@@ -133,6 +133,7 @@ TEE_AES_ctr128_encrypt(const unsigned char* in_data,
   uint32_t blockOffset = *num;
   uint32_t len = length;
   TEEC_SharedMemory g_outm;
+  uint8_t temp[16];
 
   if (!key || !out_data || !num || !iv)
     return EINVAL;
@@ -202,6 +203,7 @@ TEE_AES_ctr128_encrypt(const unsigned char* in_data,
   /* TA Key */
   op.params[PARAM_AES_KEY].memref.parent = &g_key;
   op.params[PARAM_AES_KEY].memref.size =  CTR_AES_KEY_SIZE;
+  memcpy(temp, out_data + offset - blockOffset, blockOffset);
 
   res = TEEC_InvokeCommand(&sess, TA_AES_CTR128_ENCRYPT, &op,
          &err_origin);
@@ -211,6 +213,8 @@ TEE_AES_ctr128_encrypt(const unsigned char* in_data,
   ion_map_and_memcpy(out_data + offset, length, secure_fd, blockOffset);
   close(secure_fd);
 #endif
+
+  memcpy(out_data + offset - blockOffset, temp, blockOffset);
 
   if(length + blockOffset > 16)
     len = length + blockOffset;

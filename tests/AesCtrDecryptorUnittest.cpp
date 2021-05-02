@@ -42,7 +42,9 @@ const uint8_t kBlockSize = AES_BLOCK_SIZE;
 typedef uint8_t KeyId[kBlockSize];
 typedef uint8_t Iv[kBlockSize];
 
+#ifndef USE_AES_TA
 static const size_t kBlockBitCount = kBlockSize * 8;
+#endif
 
 typedef android::CryptoPlugin::SubSample SubSample;
 
@@ -92,7 +94,7 @@ class AesCtrDecryptorTest : public ::testing::Test {
                     opensslIv, previousEncryptedCounter,
                     &blockOffset);
 #else
-            TEE_AES_ctr128_encrypt(source + offset, destination + offset,
+            TEE_AES_ctr128_encrypt(source, destination,
                     subSample.mNumBytesOfEncryptedData, (const char*)keyVector.array(),
                     opensslIv, previousEncryptedCounter,
                     &blockOffset, offset, false);
